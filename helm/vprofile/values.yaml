@@ -1,6 +1,6 @@
 app:
   image: 996818459618.dkr.ecr.us-east-1.amazonaws.com/vprofile_app_image
-  tag: 1e15bb7
+  tag: 7bb675e
   replicas: 1
   containerPort: 8080
   servicePort: 8080
