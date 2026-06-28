@@ -20,6 +20,8 @@ spec:
         ports:
         - name: vpromq01-port
           containerPort: {{ .Values.rabbitmq.containerPort }}
+          resources:
+{{ toYaml .Values.rabbitmq.resources | indent 10 }}
         env:
           - name: RABBITMQ_DEFAULT_PASS
             valueFrom:

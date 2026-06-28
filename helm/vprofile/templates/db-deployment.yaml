@@ -24,6 +24,8 @@ spec:
         ports:
         - name: vprodb-port
           containerPort: {{ .Values.db.containerPort }}
+          resources:
+{{ toYaml .Values.db.resources | indent 10 }}
         env:
           - name: MYSQL_ROOT_PASSWORD
             valueFrom:
