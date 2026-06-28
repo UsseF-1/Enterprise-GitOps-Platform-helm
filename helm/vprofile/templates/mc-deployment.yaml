@@ -4,21 +4,27 @@ metadata:
   name: vpromc
   labels:
     app: vpromc
+
 spec:
   replicas: {{ .Values.memcached.replicas }}
+
   selector:
     matchLabels:
       app: vpromc
+
   template:
     metadata:
       labels:
         app: vpromc
+
     spec:
       containers:
-      - name: vpromc
-        image: {{ .Values.memcached.image }}:{{ .Values.memcached.tag }}
-        ports:
-        - name: vpromc-port
-          containerPort: {{ .Values.memcached.containerPort }}
+        - name: vpromc
+          image: {{ .Values.memcached.image }}:{{ .Values.memcached.tag }}
+
+          ports:
+            - name: vpromc-port
+              containerPort: {{ .Values.memcached.containerPort }}
+
           resources:
-{{ toYaml .Values.memcached.resources | indent 10 }}
+{{- toYaml .Values.memcached.resources | nindent 12 }}
