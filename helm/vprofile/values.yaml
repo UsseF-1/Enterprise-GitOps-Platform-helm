@@ -5,6 +5,15 @@ app:
   containerPort: 8080
   servicePort: 8080
   defaultUser: guest
+  
+  hpa:
+    enabled: true
+
+    minReplicas: 2
+
+    maxReplicas: 10
+
+    targetCPUUtilizationPercentage: 70
 
 db:
   image: vprocontainers/vprofiledb

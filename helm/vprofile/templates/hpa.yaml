@@ -1,0 +1,28 @@
+{{- if .Values.app.hpa.enabled }}
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+
+metadata:
+  name: vproapp
+  namespace: {{ .Release.Namespace }}
+
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vproapp
+
+  minReplicas: {{ .Values.app.hpa.minReplicas }}
+
+  maxReplicas: {{ .Values.app.hpa.maxReplicas }}
+
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.app.hpa.targetCPUUtilizationPercentage }}
+
+{{- end }}
