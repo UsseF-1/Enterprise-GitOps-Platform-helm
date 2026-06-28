@@ -1,65 +1,176 @@
-# Enterprise GitOps Platform Helm
+# Enterprise GitOps Platform — Helm
 
-## Overview
+> **Part of a 3-repository GitOps system.**
+> This repo is the GitOps target — ArgoCD watches it and deploys whatever is here to EKS.
+> You rarely touch this repo manually; the app repo's CI pipeline updates it automatically.
+>
+> | Repo | Purpose |
+> |------|---------|
+> | [`Enterprise-GitOps-Platform-app`](../Enterprise-GitOps-Platform-app) | Java source, Dockerfiles, CI pipeline |
+> | [`Enterprise-GitOps-Platform-infra`](../Enterprise-GitOps-Platform-infra) | Terraform — EKS, ECR, VPC, SonarQube |
+> | **`Enterprise-GitOps-Platform-helm`** ← you are here | Helm chart, ArgoCD manifests |
 
-This repository contains a Helm chart and ArgoCD manifests for deploying the `vprofile` application stack to Kubernetes.
+---
 
-The project is designed for GitOps-style delivery and includes:
+## What This Repo Does
 
-- A Helm chart in `helm/vprofile`
-- ArgoCD `Application` and `AppProject` manifests in `argoCD/`
-- Standalone Kubernetes manifest examples in `k8s/`
+This is the **GitOps source of truth** for the vprofile application stack on EKS.
 
-The application stack includes:
-
-- `vproapp`: main application deployment
-- `vprodb`: MySQL-compatible database deployment
-- `vprocache01`: Memcached deployment
-- `vpromq01`: RabbitMQ deployment
-- Ingress support for HTTP traffic
-- Horizontal Pod Autoscaling for the application
-- Persistent storage for the database
-- Kubernetes secrets for database and RabbitMQ credentials
-- Optional private Docker registry image pull secret
+- The **Helm chart** (`helm/vprofile/`) defines all Kubernetes resources for the app
+- The **ArgoCD manifests** (`argoCD/`) tell ArgoCD to watch this repo and sync to EKS
+- When the app repo's CI pipeline builds a new image, it commits a tag update to `helm/vprofile/values.yaml` in this repo
+- ArgoCD detects the commit, renders the Helm chart, and deploys the change to EKS automatically — no manual `kubectl` needed
 
 ---
 
 ## Repository Structure
 
-- `argoCD/app/vprofile-app.yaml` - ArgoCD `Application` manifest for the Helm chart
-- `argoCD/projects/vprofile-project.yaml` - ArgoCD project definition
-- `helm/vprofile/Chart.yaml` - Helm chart metadata
-- `helm/vprofile/values.yaml` - Default Helm values for the chart
-- `helm/vprofile/templates/` - Kubernetes manifests rendered by Helm
-- `k8s/` - Raw Kubernetes manifests for manual deployment or reference
+```
+.
+├── argoCD/
+│   ├── app/
+│   │   └── vprofile-app.yaml       # ArgoCD Application — points to helm/vprofile
+│   └── projects/
+│       └── vprofile-project.yaml   # ArgoCD AppProject — scopes access
+├── helm/
+│   └── vprofile/
+│       ├── Chart.yaml              # Chart metadata
+│       ├── values.yaml             # Default values (image tag updated by CI)
+│       ├── output.yaml             # Rendered output for reference
+│       └── templates/
+│           ├── app-deployment.yaml      # vproapp Deployment + init containers
+│           ├── db-deployment.yaml       # vprodb Deployment + PVC mount
+│           ├── mc-deployment.yaml       # Memcached Deployment
+│           ├── rmq-deployment.yaml      # RabbitMQ Deployment
+│           ├── services.yaml            # ClusterIP services for all 4 components
+│           ├── ingress.yaml             # AWS ALB Ingress (conditional)
+│           ├── hpa.yaml                 # HorizontalPodAutoscaler for vproapp
+│           ├── pvc.yaml                 # PersistentVolumeClaim for MySQL data
+│           ├── secret.yaml              # Opaque secret for DB + RMQ passwords
+│           └── dockerregistry-secret.yaml  # Optional private registry pull secret
+└── k8s/                            # Raw manifests (reference only, not used by ArgoCD)
+```
 
 ---
 
-## Requirements
+## Application Architecture on Kubernetes
 
-- Kubernetes cluster (1.19+ recommended)
-- Helm 3
-- ArgoCD installed and configured in your cluster
-- `kubectl` configured for the target cluster
-- Optional: AWS ALB ingress controller when using the provided ALB annotations
+```
+                    Internet
+                       │
+              ┌────────▼────────┐
+              │   AWS ALB       │  ← created by ALB Ingress Controller
+              │  (port 80)      │
+              └────────┬────────┘
+                       │
+              ┌────────▼────────┐
+              │  vproapp-service│  ClusterIP :8080
+              └────────┬────────┘
+                       │
+         ┌─────────────▼─────────────┐
+         │        vproapp            │  Deployment (HPA: 2–10 pods)
+         │   Spring MVC / Tomcat     │
+         └──┬──────────┬─────────────┘
+            │          │
+   ┌────────▼──┐  ┌────▼──────────┐
+   │  vprodb   │  │  vprocache01  │
+   │  MySQL    │  │  Memcached    │
+   │  (+ PVC)  │  │               │
+   └───────────┘  └───────────────┘
+            │
+   ┌────────▼──┐
+   │  vpromq01 │
+   │  RabbitMQ │
+   └───────────┘
+```
+
+**Init containers** on `vproapp` ensure the pod only starts after `vprodb` and `vprocache01` DNS are resolvable.
+
+---
+
+## Deployed Resources
+
+| Resource | Kind | Description |
+|----------|------|-------------|
+| `vproapp` | Deployment | Main application — image updated by CI |
+| `vprodb` | Deployment | MySQL database |
+| `vpromc` | Deployment | Memcached |
+| `vpromq01` | Deployment | RabbitMQ |
+| `vproapp-service` | Service (ClusterIP) | Routes to app on port 8080 |
+| `vprodb` | Service (ClusterIP) | Routes to MySQL on port 3306 |
+| `vprocache01` | Service (ClusterIP) | Routes to Memcached on port 11211 |
+| `vpromq01` | Service (ClusterIP) | Routes to RabbitMQ on port 5672 |
+| `vpro-ingress` | Ingress | AWS ALB — internet-facing, port 80 |
+| `vproapp` | HPA | CPU-based autoscaling — min 2, max 10 pods |
+| `db-pv-claim` | PVC | 8Gi EBS volume for MySQL data (gp2) |
+| `<release>-app-secret` | Secret | DB password + RMQ password |
+
+---
+
+## ArgoCD Setup
+
+### Prerequisites
+
+- ArgoCD installed in the `argocd` namespace (see the infra repo for install steps)
+- EKS cluster running and `kubectl` configured
+
+### Apply the manifests
+
+```bash
+# Create the ArgoCD project first
+kubectl apply -f argoCD/projects/vprofile-project.yaml
+
+# Then create the Application
+kubectl apply -f argoCD/app/vprofile-app.yaml
+```
+
+ArgoCD will immediately sync the Helm chart to the `vprofile` namespace (created automatically).
+
+### Sync behavior
+
+| Setting | Value |
+|---------|-------|
+| Auto-sync | ✅ enabled |
+| Prune | ✅ enabled (removes resources deleted from Git) |
+| Self-heal | ✅ enabled (reverts manual `kubectl` changes) |
+| Namespace creation | ✅ automatic |
+
+### Monitor sync status
+
+```bash
+# Via CLI
+argocd app get vprofile
+argocd app sync vprofile   # manual sync if needed
+
+# Via UI — get the ArgoCD URL
+kubectl get ingress -n argocd
+```
 
 ---
 
 ## Helm Chart
 
-The Helm chart is located at `helm/vprofile`.
-
-### Install using Helm
+### Install manually (without ArgoCD)
 
 ```bash
 kubectl create namespace vprofile
-helm install vprofile ./helm/vprofile --namespace vprofile
+
+helm install vprofile ./helm/vprofile \
+  --namespace vprofile \
+  --set ingress.host=yourdomain.com
 ```
 
 ### Upgrade
 
 ```bash
 helm upgrade vprofile ./helm/vprofile --namespace vprofile
+```
+
+### Lint & dry-run
+
+```bash
+helm lint ./helm/vprofile
+helm template vprofile ./helm/vprofile --debug
 ```
 
 ### Uninstall
@@ -69,178 +180,121 @@ helm uninstall vprofile --namespace vprofile
 kubectl delete namespace vprofile
 ```
 
-### Override values
+---
 
-You can customize the deployment by providing a custom values file or using `--set`.
+## Values Reference
 
-```bash
-helm install vprofile ./helm/vprofile --namespace vprofile --create-namespace \
-  -f custom-values.yaml
+Full defaults in `helm/vprofile/values.yaml`. Key values:
+
+```yaml
+app:
+  image: <ECR_URL>/vprofile_app_image   # updated automatically by CI
+  tag: <COMMIT_SHA>                      # updated automatically by CI
+  replicas: 1
+  resources:
+    requests: { cpu: 200m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+db:
+  image: vprocontainers/vprofiledb
+  tag: latest
+  storageClass: gp2
+  storageSize: 8Gi
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { cpu: "1",  memory: 2Gi }
+
+ingress:
+  enabled: true
+  host: ""               # set to your domain
+  certificateArn: ""     # set for HTTPS
+
+secrets:
+  dbPassword: vprodbpass  # change before production
+  rmqPassword: guest      # change before production
 ```
 
-Or:
+### Override for production
 
 ```bash
-helm install vprofile ./helm/vprofile --namespace vprofile --create-namespace \
-  --set app.replicas=2 --set ingress.host=example.com
+helm upgrade vprofile ./helm/vprofile \
+  --namespace vprofile \
+  --set ingress.host=app.yourdomain.com \
+  --set ingress.certificateArn=arn:aws:acm:us-east-1:ACCOUNT:certificate/CERT_ID \
+  --set secrets.dbPassword=<STRONG_PASSWORD> \
+  --set secrets.rmqPassword=<STRONG_PASSWORD>
 ```
 
 ---
 
-## ArgoCD Deployment
+## How the GitOps Loop Works
 
-ArgoCD is configured to deploy the Helm chart directly from this repository.
-
-### Apply ArgoCD manifests
-
-```bash
-kubectl apply -f argoCD/projects/vprofile-project.yaml
-kubectl apply -f argoCD/app/vprofile-app.yaml
+```
+Developer pushes code to app repo
+         │
+         ▼
+GitHub Actions (app repo ci.yml)
+  1. Build Docker image
+  2. Trivy scan
+  3. Push to ECR with tag = short SHA
+  4. git clone this repo (helm repo)
+  5. yq update helm/vprofile/values.yaml
+       app.image = <ECR_URL>
+       app.tag   = <SHA>
+  6. git commit + push
+         │
+         ▼
+ArgoCD detects new commit in this repo
+  1. Renders Helm chart with new values
+  2. Compares with live EKS state
+  3. Applies diff → rolling update to vproapp pods
+         │
+         ▼
+New version live on EKS ✅
 ```
 
-### How it works
-
-- `argoCD/projects/vprofile-project.yaml` defines an ArgoCD `AppProject` that allows deployments from this Git repository to the `vprofile` namespace.
-- `argoCD/app/vprofile-app.yaml` defines an ArgoCD `Application` that points to the Helm chart under `helm/vprofile` and uses `values.yaml`.
-- The application is configured with automated sync, prune, and self-heal.
-- ArgoCD will create the namespace automatically via `CreateNamespace=true`.
-
 ---
 
-## Chart Values
+## Raw Kubernetes Manifests (`k8s/`)
 
-The default chart values are defined in `helm/vprofile/values.yaml`.
+The `k8s/` directory contains non-templated manifests covering the same stack. These are useful for:
 
-Key sections include:
+- Understanding the raw resource structure before templating
+- Quick manual testing on a local cluster (minikube/kind)
+- Reference when debugging Helm-rendered output
 
-- `app` - main application image, runtime ports, replica count, resources, HPA settings, and default user
-- `db` - database image, ports, storage settings, resources, and credentials
-- `memcached` - memcached image, replicas, ports, and resources
-- `rabbitmq` - RabbitMQ image, ports, user, and resources
-- `initcontainers` - image used by init containers that wait for dependent services
-- `ingress` - enable/disable ingress, hostname, port, and certificate ARN
-- `dockerregistry` - optional private registry configuration
-- `secrets` - database and RabbitMQ passwords used to generate Kubernetes secrets
+They are **not** used by ArgoCD. To apply manually:
 
-### Default values highlights
-
-- `app.replicas: 1`
-- `app.hpa.enabled: true`
-- `app.hpa.minReplicas: 2`
-- `app.hpa.maxReplicas: 10`
-- `db.storageSize: 8Gi`
-- `ingress.enabled: true`
-- `ingress.host: ""`
-- `dockerregistry.enabled: false`
-
----
-
-## Templates and Resources
-
-The Helm chart renders the following Kubernetes resources:
-
-- `Deployment` for `vproapp`
-- `Deployment` for `vprodb`
-- `Deployment` for `vprocache01`
-- `Deployment` for `vpromq01`
-- `Service` objects for application, database, cache, and RabbitMQ
-- `Ingress` using ALB annotations when enabled
-- `HorizontalPodAutoscaler` for the application when `app.hpa.enabled` is true
-- `PersistentVolumeClaim` for database storage
-- `Secret` for DB and RabbitMQ credentials
-- Optional `dockerconfigjson` secret for private registries
-
-### Important behavior
-
-- `vproapp` uses init containers to wait for the database and memcached services to become resolvable.
-- `vprodb` mounts a PVC named `db-pv-claim` and cleans `lost+found` during startup.
-- `vpromq01` reads RabbitMQ password from the generated Kubernetes secret.
-
----
-
-## Standalone Kubernetes Manifests
-
-The `k8s/` folder contains raw manifests for manual deployment or reference.
-
-Files include:
-
-- `k8s/appdeploy.yaml`
-- `k8s/appingress.yaml`
-- `k8s/appservice.yaml`
-- `k8s/dbdeploy.yaml`
-- `k8s/dbpvc.yaml`
-- `k8s/dbservice.yaml`
-- `k8s/mcdep.yaml`
-- `k8s/mcservice.yaml`
-- `k8s/rmqdeploy.yaml`
-- `k8s/rmqservice.yaml`
-- `k8s/secret.yaml`
-
-Use these manifests when you want a non-Helm or non-ArgoCD installation path.
-
----
-
-## Configuration Notes
-
-- Set `ingress.host` in `helm/vprofile/values.yaml` before deploying to enable routing.
-- If using an AWS ALB ingress controller, ensure the cluster has the correct ALB controller installed.
-- If you need to pull images from a private registry, enable `dockerregistry.enabled` and populate the registry fields.
-- The secret values in `helm/vprofile/templates/secret.yaml` are base64-encoded at render time from `values.yaml`.
+```bash
+kubectl create namespace vprofile
+kubectl apply -f k8s/ -n vprofile
+```
 
 ---
 
 ## Troubleshooting
 
-- If the app pods remain pending, check PVC provisioning and storage class availability.
-- If services cannot resolve, verify Kubernetes DNS and the namespace deployment target.
-- If ArgoCD cannot sync, ensure the repository URL and branch/tag are correct in `argoCD/app/vprofile-app.yaml`.
-- For ingress issues, verify the ingress controller and the `host` value.
-
----
-
-## Customizing the Deployment
-
-To customize resource requests, replica counts, or image tags, update `helm/vprofile/values.yaml` or pass overrides through Helm.
-
-Example custom values file:
-
-```yaml
-app:
-  replicas: 2
-  tag: "61018f8"
-  resources:
-    requests:
-      cpu: 300m
-      memory: 512Mi
-    limits:
-      cpu: 1
-      memory: 1Gi
-
-ingress:
-  enabled: true
-  host: example.com
-
-secrets:
-  dbPassword: secure-db-password
-  rmqPassword: secure-rmq-password
-```
-
-### Deploy with custom values
-
+**App pods stuck in `Init` state**
+Init containers wait for `vprodb` and `vprocache01` DNS. Check that the DB and Memcached deployments are healthy first:
 ```bash
-helm upgrade --install vprofile ./helm/vprofile --namespace vprofile --create-namespace -f custom-values.yaml
+kubectl get pods -n vprofile
+kubectl describe pod <vproapp-pod> -n vprofile
 ```
 
----
+**PVC stuck in `Pending`**
+The EBS CSI driver must be running and the `gp2` StorageClass must exist:
+```bash
+kubectl get pods -n kube-system | grep ebs-csi
+kubectl get storageclass
+```
 
-## Notes
+**ArgoCD OutOfSync after manual kubectl change**
+Self-heal is enabled — ArgoCD will revert it within seconds. If you need to make a persistent change, update `values.yaml` in this repo instead.
 
-- This repository is intended for a GitOps-style workflow using ArgoCD and Helm.
-- The chart values are intentionally configurable for development and production environments.
-- Replace placeholder values such as `ingress.host` and Docker image tags according to your environment.
-
----
-
-## License
-
-No license is specified in this repository. Add a `LICENSE` file if you want to define project licensing.
+**Image not updating**
+Check that the CI pipeline's `update-helm` job completed successfully in the app repo's Actions tab, and verify the commit landed in this repo's `main` branch.
