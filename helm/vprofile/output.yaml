@@ -1,0 +1,342 @@
+---
+# Source: vprofile/templates/secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: release-name-app-secret
+type: Opaque
+data:
+  db-pass: dnByb2RicGFzcw==
+  rmq-pass: Z3Vlc3Q=
+---
+# Source: vprofile/templates/pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: db-pv-claim
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp2
+  resources:
+    requests:
+      storage: 8Gi
+---
+# Source: vprofile/templates/services.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: vproapp-service
+spec:
+  selector:
+    app: vproapp
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+  type: ClusterIP
+---
+# Source: vprofile/templates/services.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: vprodb
+spec:
+  selector:
+    app: vprodb
+  ports:
+  - port: 3306
+    targetPort: vprodb-port
+    protocol: TCP
+  type: ClusterIP
+---
+# Source: vprofile/templates/services.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: vprocache01
+spec:
+  selector:
+    app: vpromc
+  ports:
+  - port: 11211
+    targetPort: vpromc-port
+    protocol: TCP
+  type: ClusterIP
+---
+# Source: vprofile/templates/services.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: vpromq01
+spec:
+  selector:
+    app: vpromq01
+  ports:
+  - port: 5672
+    targetPort: vpromq01-port
+    protocol: TCP
+  type: ClusterIP
+---
+# Source: vprofile/templates/app-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vproapp
+  labels:
+    app: vproapp
+
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: vproapp
+
+  template:
+    metadata:
+      labels:
+        app: vproapp
+
+    spec:
+
+      containers:
+        - name: vproapp
+          image: 996818459618.dkr.ecr.us-east-1.amazonaws.com/vprofile_app_image:61018f8
+          imagePullPolicy: Always
+
+          ports:
+            - name: vproapp-port
+              containerPort: 8080
+
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 200m
+              memory: 256Mi
+
+      initContainers:
+        - name: init-mydb
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - |
+              until nslookup vprodb.$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace).svc.cluster.local; do
+                echo waiting for mydb;
+                sleep 2;
+              done;
+
+        - name: init-memcache
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - |
+              until nslookup vprocache01.$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace).svc.cluster.local; do
+                echo waiting for memcache;
+                sleep 2;
+              done;
+---
+# Source: vprofile/templates/db-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vprodb
+  labels:
+    app: vprodb
+
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: vprodb
+
+  template:
+    metadata:
+      labels:
+        app: vprodb
+
+    spec:
+
+      containers:
+        - name: vprodb
+          image: vprocontainers/vprofiledb:latest
+
+          ports:
+            - name: vprodb-port
+              containerPort: 3306
+
+          resources:
+            limits:
+              cpu: "1"
+              memory: 2Gi
+            requests:
+              cpu: 500m
+              memory: 1Gi
+
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: release-name-app-secret
+                  key: db-pass
+
+          volumeMounts:
+            - name: vpro-db-data
+              mountPath: /var/lib/mysql
+
+      volumes:
+        - name: vpro-db-data
+          persistentVolumeClaim:
+            claimName: db-pv-claim
+
+      initContainers:
+        - name: busybox
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - rm -rf /var/lib/mysql/lost+found
+
+          volumeMounts:
+            - name: vpro-db-data
+              mountPath: /var/lib/mysql
+---
+# Source: vprofile/templates/mc-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vpromc
+  labels:
+    app: vpromc
+
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: vpromc
+
+  template:
+    metadata:
+      labels:
+        app: vpromc
+
+    spec:
+      containers:
+        - name: vpromc
+          image: memcached:latest
+
+          ports:
+            - name: vpromc-port
+              containerPort: 11211
+
+          resources:
+            limits:
+              cpu: 250m
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+---
+# Source: vprofile/templates/rmq-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vpromq01
+  labels:
+    app: vpromq01
+
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: vpromq01
+
+  template:
+    metadata:
+      labels:
+        app: vpromq01
+
+    spec:
+      containers:
+        - name: vpromq01
+          image: rabbitmq:latest
+
+          ports:
+            - name: vpromq01-port
+              containerPort: 5672
+
+          resources:
+            limits:
+              cpu: 500m
+              memory: 1Gi
+            requests:
+              cpu: 250m
+              memory: 512Mi
+
+          env:
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: release-name-app-secret
+                  key: rmq-pass
+
+            - name: RABBITMQ_DEFAULT_USER
+              value: "guest"
+---
+# Source: vprofile/templates/hpa.yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+
+metadata:
+  name: vproapp
+  namespace: default
+
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vproapp
+
+  minReplicas: 2
+
+  maxReplicas: 10
+
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+---
+# Source: vprofile/templates/ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vpro-ingress
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+    alb.ingress.kubernetes.io/backend-protocol: HTTP
+spec:
+  ingressClassName: alb
+  rules:
+  - host: 
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: vproapp-service
+            port:
+              number: 80
